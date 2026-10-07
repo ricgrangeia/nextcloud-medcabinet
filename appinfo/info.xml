@@ -20,7 +20,7 @@ semanas depois de abertos, mesmo com a caixa a dizer 2028. Registando a data de 
 usa a validade efetiva em vez da impressa -- senao o aviso de validade mente.
 
 Pensada para ser usada a mao e por um agente: toda a API e OCS, chamavel com uma app password.]]></description>
-	<version>0.1.0</version>
+	<version>0.2.0</version>
 	<licence>AGPL-3.0-or-later</licence>
 	<author mail="ricardo@grangeia.pt">Ricardo</author>
 	<namespace>MedCabinet</namespace>
