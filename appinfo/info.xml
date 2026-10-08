@@ -27,7 +27,7 @@ responde uma data plausivel. A verificacao vive do lado que escreve o registo, p
 novo ou um modelo novo continuem a passar por ela.
 
 Pensada para ser usada a mao e por um agente: toda a API e OCS, chamavel com uma app password.]]></description>
-	<version>0.4.0</version>
+	<version>0.4.1</version>
 	<licence>AGPL-3.0-or-later</licence>
 	<author mail="ricardo@grangeia.pt">Ricardo</author>
 	<namespace>MedCabinet</namespace>
