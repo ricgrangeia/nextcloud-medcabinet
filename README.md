@@ -148,6 +148,88 @@ mês**, não dia zero. `280300` é 31 de março de 2028. Ao pé da letra dá uma
 arredondado para o dia 1 encurta a validade um mês inteiro, e a app deitaria fora
 medicamentos bons.
 
+## Catalogar uma caixa com a IA do Nextcloud
+
+Fotografa a caixa — a frente para o nome, o painel onde está a validade — e envia as fotos.
+Não precisa de serviço nenhum de fora: usa os fornecedores de IA do próprio servidor, pela
+API de `TaskProcessing`.
+
+```bash
+# Ver o que a IA deste servidor sabe fazer com imagens
+curl -u ric:app-password -H 'OCS-APIRequest: true' \
+  'https://nuvem/ocs/v2.php/apps/medcabinet/api/v1/ai/status'
+
+# Enviar fotografias (devolve 202 com o id da leitura)
+curl -u ric:app-password -H 'OCS-APIRequest: true' \
+  -F 'file[]=@frente.jpg' -F 'file[]=@validade.jpg' \
+  'https://nuvem/ocs/v2.php/apps/medcabinet/api/v1/ai/scan'
+
+# Fotos que já estão no Nextcloud (tiradas com a app do telemóvel)
+curl -u ric:app-password -H 'OCS-APIRequest: true' \
+  -d 'fileIds[]=1234' -d 'fileIds[]=1235' \
+  'https://nuvem/ocs/v2.php/apps/medcabinet/api/v1/ai/scan'
+
+# O ponto da leitura, e a proposta quando terminar (text=1 traz o texto em bruto)
+curl -u ric:app-password -H 'OCS-APIRequest: true' \
+  'https://nuvem/ocs/v2.php/apps/medcabinet/api/v1/ai/scans/7?text=1'
+```
+
+### Duas tarefas, com papéis diferentes
+
+| Tarefa | O que faz | De onde saem os campos |
+| --- | --- | --- |
+| `core:analyze-images` | reconhece **que produto é** | nome, substância, forma |
+| `core:image2text:ocr` | transcreve **o que está impresso** | validade, lote, dosagem, quantidade |
+
+A divisão não é arbitrária. Classificar é o que um modelo faz bem e uma expressão regular
+não faz de maneira nenhuma. Transcrever é o contrário: a resposta certa está impressa na
+caixa, letra a letra, e sobre o texto extraído são **regras** que encontram a validade — não
+um modelo.
+
+### Um número que o texto não confirme não conta como lido
+
+É a regra que molda tudo isto. Um modelo a quem falta a validade na fotografia não devolve
+«não sei»: devolve **uma data plausível**. E uma data plausível errada é exatamente o que
+esta app existe para evitar.
+
+Por isso tudo o que é transcrição — validade, lote, dosagem, quantidade, códigos — é
+conferido contra o texto do OCR. O que não aparecer lá fica em `unverified`, entra em
+`needsReview`, e na interface aparece a vermelho com «não confirmado». A comparação ignora
+pontuação, porque `03/2028`, `03-2028` e `032028` são a mesma coisa impressa de maneiras
+diferentes.
+
+Consequência honesta: **sem OCR no servidor, nenhum número proposto pelo modelo conta como
+confirmado.** O `GET /ai/status` diz as duas capacidades em separado por isso mesmo.
+
+Ao modelo pede-se explicitamente que **não use o que sabe sobre o produto**. Um modelo que
+conhece a marca preenche a dosagem de cabeça — acerta quase sempre, e o «quase» é uma caixa
+de 1000 mg registada como 500.
+
+### É assíncrono, e tem de ser
+
+Um modelo local a olhar para três fotografias leva mais do que um pedido web aguenta. O
+`POST /ai/scan` devolve logo `202`; as tarefas são agendadas e a app é avisada por evento
+(`TaskSuccessfulEvent`/`TaskFailedEvent`), continuando o trabalho quando a IA responder. O
+resultado chega pelas **notificações do Nextcloud** — fechar o separador não perde nada.
+
+Um trabalho de fundo de meia em meia hora fecha as leituras que ficaram penduradas, mas só
+depois de perguntar à IA pela tarefa: um evento pode perder-se com a tarefa a ter corrido
+bem, e desistir sem perguntar perdia uma leitura boa.
+
+### Onde ficam as fotografias
+
+Nos **Ficheiros do próprio utilizador**, em `Medicamentos/Caixas` (configurável em
+`ai_photos_folder`), não no appdata da app. Duas razões que apontam para o mesmo lado: a
+`TaskProcessing` só aceita ficheiros a que o utilizador tem acesso, e a fotografia da caixa
+é a prova de onde a validade saiu — vale mais guardada onde ele a encontra.
+
+### Precisa de um fornecedor de IA instalado
+
+A app não traz modelo nenhum. Precisa de um fornecedor que registe
+`core:analyze-images` ou `core:image2text:ocr` — por exemplo o *Local AI Assistant* ou o
+*Context Chat*. Confirma-se em **Definições de administração > Inteligência artificial**, e
+`GET /ai/status` diz exatamente o que falta.
+
 ### Para a leitura por fotografia funcionar
 
 É preciso um serviço que leia DataMatrix de uma imagem, configurado em
@@ -167,8 +249,14 @@ npm install && npm run build
 composer run test:unit
 ```
 
-Os testes são unitários puros sobre `CabinetService` e correm **sem um Nextcloud à volta** —
-`tests/bootstrap.php` usa os stubs do `nextcloud/ocp` quando não encontra um servidor.
+Os testes são unitários puros e correm **sem um Nextcloud à volta** — `tests/bootstrap.php`
+usa os stubs do `nextcloud/ocp` quando não encontra um servidor.
+
+Nota sobre esses stubs: `OCP\Files\IRootFolder` **não se consegue simular** fora de um
+servidor, porque herda de `OC\Hooks\Emitter`, que é do namespace privado e o pacote de
+stubs não traz. É por isso que o acesso a ficheiros vive à parte, em `PhotoStore`: ali não
+há decisão nenhuma, e o `AiScanService`, que é onde está tudo o que vale a pena testar,
+fica testável.
 
 ## Licença
 

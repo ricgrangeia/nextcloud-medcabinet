@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace OCA\MedCabinet\Controller;
 
+use OCA\MedCabinet\Service\AiScanService;
 use OCA\MedCabinet\Service\CabinetService;
 use OCA\MedCabinet\Service\EpisodeService;
 use OCA\MedCabinet\Service\MedicineService;
@@ -36,6 +37,7 @@ class ApiController extends OCSController {
 		private MedicineService $medicineService,
 		private EpisodeService $episodeService,
 		private ScanService $scanService,
+		private AiScanService $aiScanService,
 		private IUserSession $userSession,
 	) {
 		parent::__construct($appName, $request);
@@ -101,6 +103,8 @@ class ApiController extends OCSController {
 				'useFirst' => 'Qual caixa gastar primeiro: a que expira mais cedo, nao a mais antiga. Com a mesma validade, a ja aberta -- abrir uma segunda tendo uma aberta garante que uma se estraga.',
 				'scanProposal' => 'O que sai de uma leitura e uma PROPOSTA, nao um registo. O que vem de um codigo de barras e exacto (tem digito de controlo); o que vem de texto numa fotografia e um palpite com boa aparencia -- um "7" lido como "1" desloca a validade seis anos e continua a parecer uma data normal. Por isso cada campo diz de onde veio, e "needsReview" lista o que precisa de confirmacao antes de /scan/apply.',
 				'gs1EndOfMonth' => 'A validade no codigo vem como AAMMDD, e o dia pode ser "00" -- que na norma GS1 significa FIM DO MES, nao dia zero. "280300" e 31 de marco de 2028. Ao pe da letra da data invalida; posto a dia 1 encurta a validade um mes inteiro.',
+				'aiScan' => 'Fotografias de uma caixa lidas pela IA do proprio Nextcloud, em duas tarefas com papeis diferentes: core:analyze-images reconhece QUE produto e (o que um modelo faz bem), e core:image2text:ocr transcreve o que esta impresso (de onde saem a validade, o lote e a dosagem, por regras e nao por modelo). Assincrono: POST /ai/scan devolve logo e a resposta chega pelas notificacoes.',
+				'unverified' => 'Campos que o modelo propos e que o texto lido da imagem NAO contem -- ou seja, que o modelo escreveu de cabeca. Um modelo a quem falta a validade na fotografia nao responde "nao sei": responde uma data plausivel. Estes campos entram sempre em needsReview, venha a proposta de onde vier.',
 				'derived' => 'Validade efetiva, stock utilizavel e ordem de uso NUNCA sao guardados -- sao sempre calculados a partir dos dados em bruto.',
 			],
 			'quickReference' => [
@@ -119,6 +123,10 @@ class ApiController extends OCSController {
 				'POST /api/v1/scan/code' => 'Interpreta a cadeia GS1 do DataMatrix de uma caixa (campo "payload"). Devolve uma PROPOSTA com "needsReview" e "canSaveDirectly" -- nao grava nada.',
 				'POST /api/v1/scan/merge' => 'Junta varias leituras da mesma caixa. Cada entrada de "observations" pode ter "payload", "values", "from" e "manual". Desacordos aparecem em "conflicts".',
 				'POST /api/v1/scan/photos' => 'Le fotografias (multipart "file" ou "file[]") a procura de codigos e junta o que encontrar. Precisa de servico de leitura configurado.',
+				'GET /api/v1/ai/status' => 'O que a IA deste servidor sabe fazer com imagens: "ocr" (transcrever) e "vision" (reconhecer o produto), em separado.',
+				'POST /api/v1/ai/scan' => 'Manda fotografias de uma caixa a IA (multipart "file"/"file[]", ou "fileIds" de ficheiros ja no Nextcloud). Devolve 202 com o id da leitura; a proposta chega depois, por notificacao.',
+				'GET /api/v1/ai/scans' => 'As leituras por fotografia, mais recente primeiro.',
+				'GET /api/v1/ai/scans/{id}' => 'Uma leitura: o ponto em que esta e a proposta. Com text=1 vem o texto em bruto de cada fase, que e o que explica porque e que um campo saiu assim.',
 				'POST /api/v1/scan/apply' => 'Grava uma proposta JA REVISTA (campo "values"): cria o medicamento se for novo, e a caixa.',
 			],
 			'notAdvice' =>
@@ -613,6 +621,96 @@ class ApiController extends OCSController {
 			return $this->badRequest($e->getMessage());
 		} catch (DoesNotExistException) {
 			return $this->badRequest('O medicamento indicado nao existe.');
+		}
+	}
+
+	// ------------------------------------------- Catalogar com a IA do servidor
+
+	/**
+	 * O que a IA deste servidor sabe fazer com imagens.
+	 *
+	 * Diz as duas capacidades em separado porque elas valem coisas
+	 * diferentes: sem OCR a app continua a reconhecer o produto, mas deixa de
+	 * poder confirmar numeros -- e isso muda o que se pode gravar sem olhar.
+	 */
+	#[NoAdminRequired]
+	#[ApiRoute(verb: 'GET', url: '/api/v1/ai/status')]
+	public function aiStatus(): DataResponse {
+		return new DataResponse($this->aiScanService->status());
+	}
+
+	/**
+	 * Manda fotografias de uma caixa a IA do Nextcloud e poe em fila.
+	 *
+	 * As fotos vao em multipart no campo "file" (ou "file[]" para varias), ou
+	 * indicam-se ficheiros que ja estao no Nextcloud em "fileIds" -- o que
+	 * serve para quem fotografa com a app de telemovel e deixa as fotos
+	 * subirem sozinhas.
+	 *
+	 * Devolve logo, com o id da leitura. A IA pode levar minutos: a resposta
+	 * chega pelas notificacoes do Nextcloud e fica em GET /ai/scans/{id}.
+	 *
+	 * @param list<int> $fileIds ficheiros que ja estao no Nextcloud
+	 */
+	#[NoAdminRequired]
+	#[ApiRoute(verb: 'POST', url: '/api/v1/ai/scan')]
+	public function aiScan(array $fileIds = []): DataResponse {
+		$userId = $this->getUserId();
+		$ids = array_values(array_filter(array_map('intval', $fileIds)));
+		$names = [];
+
+		$uploaded = $this->uploadedFiles();
+		if ($uploaded !== []) {
+			try {
+				$stored = $this->aiScanService->storePhotos($userId, $uploaded);
+			} catch (ScanException $e) {
+				return $this->badRequest($e->getMessage());
+			}
+			$ids = array_merge($ids, $stored['fileIds']);
+			$names = $stored['names'];
+		}
+
+		if ($ids === []) {
+			return $this->badRequest(
+				'Faltam as fotografias: envia-as em multipart no campo "file" (ou "file[]" para '
+				. 'varias), ou indica "fileIds" de ficheiros que ja estao no Nextcloud.'
+			);
+		}
+
+		try {
+			$job = $this->aiScanService->enqueue($userId, $ids, $names);
+		} catch (ScanException $e) {
+			return $this->badRequest($e->getMessage());
+		}
+
+		return new DataResponse($job->jsonSerialize(), Http::STATUS_ACCEPTED);
+	}
+
+	/**
+	 * As leituras por fotografia, mais recente primeiro.
+	 */
+	#[NoAdminRequired]
+	#[ApiRoute(verb: 'GET', url: '/api/v1/ai/scans')]
+	public function aiScans(): DataResponse {
+		return new DataResponse($this->aiScanService->listForUser($this->getUserId()));
+	}
+
+	/**
+	 * Uma leitura: em que ponto esta e, quando terminar, a proposta.
+	 *
+	 * Com `text=1` vem tambem o texto em bruto que saiu de cada fase. E a
+	 * resposta a "porque e que a validade saiu assim": sem o texto, uma
+	 * proposta estranha nao se consegue explicar.
+	 */
+	#[NoAdminRequired]
+	#[ApiRoute(verb: 'GET', url: '/api/v1/ai/scans/{id}')]
+	public function aiScanDetail(int $id, int $text = 0): DataResponse {
+		try {
+			return new DataResponse(
+				$this->aiScanService->get($id, $this->getUserId(), $text === 1)
+			);
+		} catch (DoesNotExistException) {
+			return $this->notFound();
 		}
 	}
 

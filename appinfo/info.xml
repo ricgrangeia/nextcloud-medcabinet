@@ -19,8 +19,14 @@ A validade impressa na caixa deixa de valer depois de aberta. Xaropes, colirios 
 semanas depois de abertos, mesmo com a caixa a dizer 2028. Registando a data de abertura, a app
 usa a validade efetiva em vez da impressa -- senao o aviso de validade mente.
 
+Para registar uma caixa bastam fotografias dela: a IA do proprio Nextcloud le-as, e a app
+devolve uma PROPOSTA -- nunca um registo. O modelo de visao diz que produto e; o texto extraido da
+imagem e que da a validade, o lote e a dosagem. Um numero que o texto nao confirme fica marcado
+como nao confirmado, porque um modelo a quem falta a validade na foto nao responde "nao sei":
+responde uma data plausivel.
+
 Pensada para ser usada a mao e por um agente: toda a API e OCS, chamavel com uma app password.]]></description>
-	<version>0.3.0</version>
+	<version>0.4.0</version>
 	<licence>AGPL-3.0-or-later</licence>
 	<author mail="ricardo@grangeia.pt">Ricardo</author>
 	<namespace>MedCabinet</namespace>
@@ -36,6 +42,9 @@ Pensada para ser usada a mao e por um agente: toda a API e OCS, chamavel com uma
 		<database>sqlite</database>
 		<nextcloud min-version="34" max-version="35"/>
 	</dependencies>
+	<background-jobs>
+		<job>OCA\MedCabinet\BackgroundJob\ReapScanJobs</job>
+	</background-jobs>
 	<navigations>
 		<navigation>
 			<id>medcabinet</id>

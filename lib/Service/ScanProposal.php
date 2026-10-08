@@ -47,8 +47,11 @@ class ScanProposal {
 	 * @param array<string, mixed> $values campos observados, null e ignorado
 	 * @param string $confidence CONFIDENCE_*
 	 * @param string $from de onde veio, para se poder explicar depois
+	 * @param bool $verified se o valor foi confirmado contra a fonte. Falso
+	 *   quando um modelo de visao propoe um numero que o texto lido da imagem
+	 *   nao contem -- ou seja, quando o modelo o escreveu de cabeca.
 	 */
-	public function observe(array $values, string $confidence, string $from): void {
+	public function observe(array $values, string $confidence, string $from, bool $verified = true): void {
 		foreach ($values as $field => $value) {
 			if ($value === null || $value === '') {
 				continue;
@@ -59,13 +62,19 @@ class ScanProposal {
 			if ($existing === null) {
 				$this->fields[$field] = [
 					'value' => $value, 'confidence' => $confidence, 'from' => $from,
+					'verified' => $verified,
 				];
 				continue;
 			}
 
 			if ((string)$existing['value'] === (string)$value) {
-				// Duas fontes a dizer o mesmo: fica a mais fiavel das duas.
-				if ($this->rank($confidence) > $this->rank($existing['confidence'])) {
+				// Duas fontes a dizer o mesmo: fica a mais fiavel das duas, e
+				// entre iguais fica a confirmada -- o valor e o mesmo, mas
+				// poder dizer que se confirmou muda o que se faz com ele.
+				$better = $this->rank($confidence) > $this->rank($existing['confidence'])
+					|| ($this->rank($confidence) === $this->rank($existing['confidence'])
+						&& $verified && !($existing['verified'] ?? true));
+				if ($better) {
 					$this->fields[$field] = [
 						'value' => $value, 'confidence' => $confidence, 'from' => $from,
 					];
@@ -79,11 +88,13 @@ class ScanProposal {
 			if ($this->rank($confidence) > $this->rank($existing['confidence'])) {
 				$this->fields[$field] = [
 					'value' => $value, 'confidence' => $confidence, 'from' => $from,
+					'verified' => $verified,
 				];
 			}
 
 			$this->conflicts[$field][] = [
 				'value' => $value, 'confidence' => $confidence, 'from' => $from,
+				'verified' => $verified,
 			];
 			if (!$this->hasConflictEntry($field, $existing)) {
 				$this->conflicts[$field][] = $existing;
@@ -101,17 +112,26 @@ class ScanProposal {
 	 * @return array{
 	 *     fields: array<string, array>, values: array<string, mixed>,
 	 *     conflicts: array<string, list<array>>, needsReview: list<string>,
-	 *     warnings: list<string>, canSaveDirectly: bool
+	 *     unverified: list<string>, warnings: list<string>, canSaveDirectly: bool
 	 * }
 	 */
 	public function result(): array {
 		$values = [];
 		$needsReview = [];
+		$unverified = [];
 
 		foreach ($this->fields as $field => $entry) {
 			$values[$field] = $entry['value'];
 			if (!in_array($entry['confidence'], self::TRUSTED, true)) {
 				$needsReview[] = $field;
+			}
+			// Nao confirmado nunca e de confianca, venha de onde vier: e um
+			// valor que ninguem conseguiu encontrar na fonte.
+			if (($entry['verified'] ?? true) === false) {
+				$unverified[] = $field;
+				if (!in_array($field, $needsReview, true)) {
+					$needsReview[] = $field;
+				}
 			}
 		}
 
@@ -134,11 +154,22 @@ class ScanProposal {
 			));
 		}
 
+		if ($unverified !== []) {
+			sort($unverified);
+			$this->warn(sprintf(
+				'Não foi possível confirmar no texto da imagem: %s. Um modelo que não encontra o '
+				. 'campo tende a escrever um valor plausível em vez de nenhum -- confirma na caixa '
+				. 'antes de gravar.',
+				implode(', ', $unverified)
+			));
+		}
+
 		return [
 			'fields' => $this->fields,
 			'values' => $values,
 			'conflicts' => $this->conflicts,
 			'needsReview' => $needsReview,
+			'unverified' => $unverified,
 			'warnings' => $this->warnings,
 			// Verdadeiro so quando tudo o que esta preenchido vem de fonte
 			// fiavel e nada discorda. E o que decide se a app pode gravar

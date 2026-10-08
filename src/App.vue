@@ -114,6 +114,19 @@ import AccountIcon from 'vue-material-design-icons/AccountMultiple.vue'
 
 .mc-bad { border-left-color: var(--color-error); }
 
+/* Um aviso diz "atencao"; isto diz "esta a acontecer" ou "ficou guardado".
+   Nao leva a barra de aviso, para o amarelo continuar a significar algo. */
+.mc-note {
+	border: 1px solid var(--color-border);
+	padding: 8px 12px;
+	margin: 12px 0;
+	background: var(--color-background-hover);
+	border-radius: var(--border-radius);
+}
+
+.mc-note > p { margin: 4px 0; }
+.mc-note summary { cursor: pointer; }
+
 /* Estado de uma embalagem. A cor nao e o unico sinal: o rotulo vai sempre
    escrito, para quem nao distinga as cores. */
 .mc-tag {

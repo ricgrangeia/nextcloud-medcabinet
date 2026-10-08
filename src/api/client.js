@@ -36,6 +36,22 @@ export default {
 	updatePackage: (id, data) => request('put', `/packages/${id}`, { data }),
 	deletePackage: (id) => request('delete', `/packages/${id}`),
 
+	// Catalogar com a IA do servidor
+	aiStatus: () => request('get', '/ai/status'),
+	aiScans: () => request('get', '/ai/scans'),
+	aiScanDetail: (id, withText = false) =>
+		request('get', `/ai/scans/${id}`, { params: { text: withText ? 1 : 0 } }),
+	aiScan: (files = [], fileIds = []) => {
+		const body = new FormData()
+		for (const file of files) {
+			body.append('file[]', file, file.name)
+		}
+		for (const id of fileIds) {
+			body.append('fileIds[]', id)
+		}
+		return ocs.post(`${base}/ai/scan`, body).then(unwrap)
+	},
+
 	// Leitura de caixas
 	scanStatus: () => request('get', '/scan/status'),
 	scanCode: (payload) => request('post', '/scan/code', { data: { payload } }),
