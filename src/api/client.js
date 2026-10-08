@@ -36,6 +36,19 @@ export default {
 	updatePackage: (id, data) => request('put', `/packages/${id}`, { data }),
 	deletePackage: (id) => request('delete', `/packages/${id}`),
 
+	// Leitura de caixas
+	scanStatus: () => request('get', '/scan/status'),
+	scanCode: (payload) => request('post', '/scan/code', { data: { payload } }),
+	scanMerge: (observations) => request('post', '/scan/merge', { data: { observations } }),
+	scanApply: (values) => request('post', '/scan/apply', { data: { values } }),
+	scanPhotos: (files) => {
+		const body = new FormData()
+		for (const file of files) {
+			body.append('file[]', file, file.name)
+		}
+		return ocs.post(`${base}/scan/photos`, body).then(unwrap)
+	},
+
 	listEpisodes: (params) => request('get', '/episodes', { params }),
 	getEpisode: (id) => request('get', `/episodes/${id}`),
 	createEpisode: (data) => request('post', '/episodes', { data }),

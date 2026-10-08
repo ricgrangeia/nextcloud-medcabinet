@@ -105,6 +105,60 @@ curl $AUTH "$BASE/episodes?q=febre"
 curl $AUTH "$BASE/overview"
 ```
 
+## Registar uma caixa por leitura
+
+As embalagens de medicamentos sujeitos a receita trazem um **DataMatrix** com o código do
+produto, o lote e a **validade** — precisamente os dados chatos e arriscados de escrever à
+mão. O nome não vem lá, mas esse lê-se na caixa num segundo.
+
+```bash
+# Interpretar o conteúdo do código (de qualquer app de leitura do telefone)
+curl $AUTH -X POST "$BASE/scan/code" -d '{"payload": "010560123456789717280331"}'
+
+# Várias fotos da mesma caixa
+curl -u 'utilizador:app-password' -H 'OCS-APIRequest: true' \
+  -F 'file[]=@frente.jpg' -F 'file[]=@painel.jpg' "$BASE/scan/photos"
+
+# Gravar, depois de revisto
+curl $AUTH -X POST "$BASE/scan/apply" -d '{"values": {
+  "name": "Brufen", "substance": "ibuprofeno", "strength": "600 mg",
+  "expiry": "2028-03-31", "batch": "AB12", "unitsTotal": 20
+}}'
+```
+
+### Uma proposta não é um registo
+
+`POST /scan/code` e `/scan/photos` devolvem uma **proposta**, e gravar é um passo separado
+de propósito. Cada campo diz de onde veio e com que confiança:
+
+- **do código** — exato, tem dígito de controlo; pode ser gravado sem perguntar
+- **de texto numa fotografia** — entra em `needsReview`
+
+A distinção não é formalidade. Um «7» lido como «1» desloca a validade seis anos e continua
+a parecer uma data perfeitamente normal — e dar uma caixa como boa dois anos depois de o
+estar é exactamente o que esta app existe para evitar.
+
+Quando duas leituras discordam, aparecem as duas em `conflicts`. Um código ganha a um texto,
+porque é verificável; entre fontes igualmente fiáveis não se escolhe à sorte.
+
+### O dia «00» do código GS1
+
+A validade vem como `AAMMDD`, e o dia pode ser `00` — que na norma GS1 significa **fim do
+mês**, não dia zero. `280300` é 31 de março de 2028. Ao pé da letra dá uma data inválida;
+arredondado para o dia 1 encurta a validade um mês inteiro, e a app deitaria fora
+medicamentos bons.
+
+### Para a leitura por fotografia funcionar
+
+É preciso um serviço que leia DataMatrix de uma imagem, configurado em
+`code_reader_url` (e `code_reader_path`, por omissão `/api/v1/image/scan`). A resposta é
+percorrida à procura de cadeias GS1, sem assumir a forma do JSON — serviços diferentes
+devolvem estruturas diferentes.
+
+`GET /api/v1/scan/status` diz se está disponível e o que falta se não estiver. Sem isso
+configurado, a interface não mostra o botão: um botão que não funciona é pior do que um
+botão ausente.
+
 ## Desenvolvimento
 
 ```bash

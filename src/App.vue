@@ -8,6 +8,9 @@
 				<NcAppNavigationItem :to="{ name: 'medicines' }" name="Medicamentos">
 					<template #icon><PillIcon :size="20" /></template>
 				</NcAppNavigationItem>
+				<NcAppNavigationItem :to="{ name: 'scan' }" name="Registar por leitura">
+					<template #icon><ScanIcon :size="20" /></template>
+				</NcAppNavigationItem>
 				<NcAppNavigationItem :to="{ name: 'episodes' }" name="Para que serviram">
 					<template #icon><HistoryIcon :size="20" /></template>
 				</NcAppNavigationItem>
@@ -32,6 +35,7 @@ import NcAppNavigationItem from '@nextcloud/vue/components/NcAppNavigationItem'
 import AlertIcon from 'vue-material-design-icons/AlertCircleOutline.vue'
 import PillIcon from 'vue-material-design-icons/Pill.vue'
 import HistoryIcon from 'vue-material-design-icons/History.vue'
+import ScanIcon from 'vue-material-design-icons/LineScan.vue'
 import AccountIcon from 'vue-material-design-icons/AccountMultiple.vue'
 </script>
 

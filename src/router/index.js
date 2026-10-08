@@ -5,6 +5,7 @@ import MedicinesView from '../views/MedicinesView.vue'
 import MedicineView from '../views/MedicineView.vue'
 import EpisodesView from '../views/EpisodesView.vue'
 import PeopleView from '../views/PeopleView.vue'
+import ScanView from '../views/ScanView.vue'
 
 export default createRouter({
 	history: createWebHashHistory(),
@@ -12,6 +13,7 @@ export default createRouter({
 		{ path: '/', name: 'overview', component: OverviewView },
 		{ path: '/medicines', name: 'medicines', component: MedicinesView },
 		{ path: '/medicines/:id', name: 'medicine', component: MedicineView, props: true },
+		{ path: '/scan', name: 'scan', component: ScanView },
 		{ path: '/episodes', name: 'episodes', component: EpisodesView },
 		{ path: '/people', name: 'people', component: PeopleView },
 	],
