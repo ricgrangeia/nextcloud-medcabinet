@@ -36,34 +36,13 @@ export default {
 	updatePackage: (id, data) => request('put', `/packages/${id}`, { data }),
 	deletePackage: (id) => request('delete', `/packages/${id}`),
 
-	// Catalogar com a IA do servidor
-	aiStatus: () => request('get', '/ai/status'),
-	aiScans: () => request('get', '/ai/scans'),
-	aiScanDetail: (id, withText = false) =>
-		request('get', `/ai/scans/${id}`, { params: { text: withText ? 1 : 0 } }),
-	aiScan: (files = [], fileIds = []) => {
-		const body = new FormData()
-		for (const file of files) {
-			body.append('file[]', file, file.name)
-		}
-		for (const id of fileIds) {
-			body.append('fileIds[]', id)
-		}
-		return ocs.post(`${base}/ai/scan`, body).then(unwrap)
-	},
-
-	// Leitura de caixas
-	scanStatus: () => request('get', '/scan/status'),
+	// Registar uma caixa pelo que se leu dela. Esta app nao trata imagens:
+	// quem fotografa e interpreta a fotografia e o agente.
 	scanCode: (payload) => request('post', '/scan/code', { data: { payload } }),
+	scanText: (text, values = {}, from = null) =>
+		request('post', '/scan/text', { data: { text, values, from } }),
 	scanMerge: (observations) => request('post', '/scan/merge', { data: { observations } }),
 	scanApply: (values) => request('post', '/scan/apply', { data: { values } }),
-	scanPhotos: (files) => {
-		const body = new FormData()
-		for (const file of files) {
-			body.append('file[]', file, file.name)
-		}
-		return ocs.post(`${base}/scan/photos`, body).then(unwrap)
-	},
 
 	listEpisodes: (params) => request('get', '/episodes', { params }),
 	getEpisode: (id) => request('get', `/episodes/${id}`),

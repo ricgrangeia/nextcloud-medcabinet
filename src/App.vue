@@ -127,6 +127,20 @@ import AccountIcon from 'vue-material-design-icons/AccountMultiple.vue'
 .mc-note > p { margin: 4px 0; }
 .mc-note summary { cursor: pointer; }
 
+.mc-form-block { display: block; }
+
+.mc-textarea {
+	width: 100%;
+	max-width: 640px;
+	font-family: monospace;
+	padding: 8px;
+	border: 2px solid var(--color-border-maxcontrast);
+	border-radius: var(--border-radius-element, var(--border-radius));
+	background: var(--color-main-background);
+	color: var(--color-main-text);
+	resize: vertical;
+}
+
 /* Estado de uma embalagem. A cor nao e o unico sinal: o rotulo vai sempre
    escrito, para quem nao distinga as cores. */
 .mc-tag {

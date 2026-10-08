@@ -194,9 +194,9 @@ class BoxTextParser {
 		$labels = 'val(?:idade)?|exp(?:iry|\.)?|valido ate|utilizar ate|usar ate';
 		$patterns = [
 			// 2028-03-31 / 2028-03
-			'/(?:' . $labels . ')\D{0,12}?(\d{4})[-\/.](\d{1,2})(?:[-\/.](\d{1,2}))?/u',
+			'/(?:' . $labels . ')\D{0,12}?(\d{4})[-\/.](\d{1,2})(?:[-\/.](\d{1,2}))?/iu',
 			// 31/03/2028 / 03/2028 / 03/28
-			'/(?:' . $labels . ')\D{0,12}?(?:(\d{1,2})[-\/.])?(\d{1,2})[-\/.](\d{2,4})/u',
+			'/(?:' . $labels . ')\D{0,12}?(?:(\d{1,2})[-\/.])?(\d{1,2})[-\/.](\d{2,4})/iu',
 		];
 
 		foreach ($patterns as $i => $pattern) {
@@ -300,8 +300,9 @@ class BoxTextParser {
 	}
 
 	private function form(string $text): ?string {
+		$lower = mb_strtolower($text);
 		foreach (self::FORMS as $needle => $form) {
-			if (str_contains($text, $needle)) {
+			if (str_contains($lower, $needle)) {
 				return $form;
 			}
 		}
@@ -309,10 +310,10 @@ class BoxTextParser {
 	}
 
 	private function unitsTotal(string $text): ?array {
-		$pattern = '/\b(\d{1,4})\s*(comprimidos?|capsulas?|saquetas?|ampolas?|supositorios?|drageias?|adesivos?)\b/u';
+		$pattern = '/\b(\d{1,4})\s*(comprimidos?|capsulas?|saquetas?|ampolas?|supositorios?|drageias?|adesivos?)\b/iu';
 		if (preg_match($pattern, $text, $m) !== 1) {
 			// Liquidos: "200 ml" e o conteudo da embalagem.
-			if (preg_match('/\b(\d{1,4})\s*ml\b(?!\s*\/)/u', $text, $m2) === 1) {
+			if (preg_match('/\b(\d{1,4})\s*ml\b(?!\s*\/)/iu', $text, $m2) === 1) {
 				return ['value' => (int)$m2[1], 'raw' => trim($m2[0])];
 			}
 			return null;
@@ -365,9 +366,16 @@ class BoxTextParser {
 		return $seen >= 2 ? rtrim($out, "\x1d") : null;
 	}
 
-	/** Minusculas, sem acentos, espacos normalizados: o que as regras esperam. */
+	/**
+	 * Sem acentos e com os espacos normalizados, mas **com as maiusculas**.
+	 *
+	 * As regras correm todas com /i, por isso nao precisam de minusculas -- e
+	 * o texto que elas devolvem vai para "evidence", que existe para se poder
+	 * comparar com o que esta impresso na caixa. "Val 03/2028" compara-se;
+	 * "val 03/2028" compara-se pior.
+	 */
 	private function flatten(string $text): string {
-		return preg_replace('/\s+/u', ' ', $this->deaccent(mb_strtolower($text)));
+		return preg_replace('/\s+/u', ' ', $this->deaccent($text));
 	}
 
 	private function deaccent(string $text): string {

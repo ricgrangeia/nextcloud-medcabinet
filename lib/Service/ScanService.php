@@ -4,37 +4,51 @@ declare(strict_types=1);
 
 namespace OCA\MedCabinet\Service;
 
-use OCA\MedCabinet\AppInfo\Application;
 use OCA\MedCabinet\Db\MedicineMapper;
 use OCA\MedCabinet\Db\Package;
-use OCP\Http\Client\IClientService;
-use OCP\IAppConfig;
-use Psr\Log\LoggerInterface;
 
 /**
  * Registar uma caixa a partir do que se le dela.
  *
- * Duas entradas, uma so saida. A entrada pode ser o conteudo de um codigo
- * (lido por uma app de telefone, por um leitor, ou colado a mao) ou
- * fotografias da embalagem. Em ambos os casos o resultado e uma PROPOSTA, e
- * nunca um registo: quem confirma e quem esta a usar a app.
+ * Esta app **nao trata imagens**, de proposito. Quem fotografa a caixa e le o
+ * que esta nela e o agente (appsagent), que ja tem modelo de visao e descobre
+ * estas rotas sozinho. Aqui ficam o registo e as regras do dominio, que e
+ * onde elas se aguentam: um modelo novo, um agente novo ou uma chamada feita
+ * a mao com `curl` continuam a passar por elas.
  *
- * Interpretar o codigo e separado de o ler de proposito. Significa que o
- * endpoint de interpretacao funciona hoje, com qualquer leitor que haja a
- * mao, sem depender de a app saber descodificar imagens -- e quando essa
- * leitura existir, entra pelo mesmo sitio.
+ * Tres entradas, uma so saida:
+ *
+ *  - `fromCode()`   -- o conteudo de um DataMatrix descodificado. Exacto, com
+ *                      digito de controlo. A entrada mais fiavel que existe.
+ *  - `fromText()`   -- o texto que se leu da caixa (o agente extraiu-o da
+ *                      fotografia, ou escreveu-se a mao). As regras do
+ *                      BoxTextParser encontram nele a validade, o lote e a
+ *                      dosagem -- por expressao regular e nao por modelo.
+ *  - `merge()`      -- varias leituras da mesma caixa juntas numa proposta.
+ *
+ * E em todas, **uma proposta nao e um registo**: gravar e `apply()`, e e um
+ * passo separado. Quem confirma e quem tem a caixa na mao.
  */
 class ScanService {
-	private const CONFIG_READER_URL = 'code_reader_url';
-	private const CONFIG_READER_PATH = 'code_reader_path';
+	/**
+	 * Campos que sao transcricao de algo impresso.
+	 *
+	 * Para estes, o que um modelo diz so vale se o texto lido o contiver. E
+	 * aqui que a app deixa de aceitar numeros que ninguem viu: um modelo a
+	 * quem falta a validade na fotografia nao responde "nao sei" -- responde
+	 * uma data plausivel, e uma data plausivel errada e exactamente o que
+	 * esta app existe para evitar.
+	 */
+	private const TRANSCRIBED = [
+		'expiry', 'batch', 'strength', 'unitsTotal', 'unitsLeft', 'cnp', 'gtin',
+	];
 
 	public function __construct(
 		private GS1Parser $gs1,
+		private BoxTextParser $boxText,
+		private FieldRules $rules,
 		private MedicineMapper $medicines,
 		private MedicineService $medicineService,
-		private IClientService $clientService,
-		private IAppConfig $appConfig,
-		private LoggerInterface $logger,
 	) {
 	}
 
@@ -64,29 +78,7 @@ class ScanService {
 			);
 		}
 
-		// O codigo identifica o produto mas nao o nomeia. Se esta caixa ja foi
-		// registada antes, o nome vem do registo anterior -- e por isso que a
-		// segunda leitura da mesma embalagem se preenche sozinha.
-		$medicine = null;
-		if ($code['gtin'] !== null) {
-			$found = $this->medicines->findByGtin($code['gtin'], $userId);
-			if ($found !== null) {
-				$medicine = $found->jsonSerialize();
-				$proposal->observe([
-					'medicineId' => $found->getId(),
-					'name' => $found->getName(),
-					'substance' => $found->getSubstance(),
-					'strength' => $found->getStrength(),
-					'form' => $found->getForm(),
-					'unit' => $found->getUnit(),
-				], ScanProposal::CONFIDENCE_MANUAL, 'registo anterior desta caixa');
-			} else {
-				$proposal->warn(
-					'Este código ainda não está associado a nenhum medicamento. Dá-lhe o nome uma '
-					. 'vez e, da próxima, a caixa preenche-se sozinha.'
-				);
-			}
-		}
+		$medicine = $this->attachKnownMedicine($proposal, $code['gtin'], $userId);
 
 		if ($code['expiry'] === null) {
 			$proposal->warn(
@@ -109,52 +101,207 @@ class ScanService {
 	}
 
 	/**
-	 * Junta varias leituras -- varias fotos, ou codigo mais o que se escreveu
-	 * -- numa proposta so.
+	 * Le uma caixa a partir do texto que se leu dela.
 	 *
-	 * @param list<array{payload?: string, values?: array, from?: string}> $observations
+	 * E a porta por onde o agente entra: ele olha para a fotografia e manda o
+	 * texto; as regras daqui e que encontram os campos. A diferenca nao e
+	 * academica -- um modelo que "le" uma data pode devolver uma data que nao
+	 * esta la, e uma expressao regular sobre o texto nao inventa: ou encontra
+	 * o que esta escrito, ou nao devolve nada.
+	 *
+	 * Opcionalmente aceita `$proposed`: campos que o agente ja extraiu. Esses
+	 * sao conferidos contra o texto, e o que nao aparecer la fica marcado como
+	 * nao confirmado.
+	 *
+	 * @param array<string, mixed> $proposed
+	 * @return array{proposal: array, medicine: ?array, read: array, rejected: array<string, string>}
+	 */
+	public function fromText(
+		string $text,
+		string $userId,
+		array $proposed = [],
+		string $from = 'texto lido da caixa',
+	): array {
+		$proposal = new ScanProposal();
+		$read = $this->boxText->parse($text);
+
+		foreach ($read['warnings'] as $warning) {
+			$proposal->warn($warning);
+		}
+
+		// A interpretacao legivel do codigo 2D, se a caixa a imprimir debaixo
+		// dele: "(01)0560...(17)280331(10)AB1234".
+		if ($read['gs1'] !== null) {
+			$code = $this->gs1->parse($read['gs1']);
+			foreach ($code['warnings'] as $warning) {
+				$proposal->warn($warning);
+			}
+			// Confianca "text" e nao "code": os digitos vieram da leitura do
+			// texto, nao de um descodificador. O digito de controlo do GTIN
+			// apanha a maior parte dos erros de um digito, nao todos.
+			$proposal->observe([
+				'gtin' => $code['gtin'],
+				'expiry' => $code['expiry'],
+				'batch' => $code['batch'],
+			], ScanProposal::CONFIDENCE_TEXT, 'código impresso na caixa (lido como texto)');
+
+			if ($code['gtin'] !== null) {
+				$proposal->warn(
+					'O código do produto foi lido do texto impresso debaixo do código 2D, não '
+					. 'descodificado. Passou o dígito de controlo, mas confirma-o antes de o '
+					. 'associar a este medicamento.'
+				);
+			}
+		}
+
+		$proposal->observe($read['values'], ScanProposal::CONFIDENCE_TEXT, $from);
+
+		// Os campos que o agente ja extraiu. Passam pelas regras de forma e,
+		// se forem transcricao, tem de aparecer no texto.
+		$rejected = [];
+		if ($proposed !== []) {
+			$cleaned = $this->rules->clean($proposed);
+			$rejected = $cleaned['rejected'];
+
+			foreach ($cleaned['rejected'] as $field => $why) {
+				$proposal->warn(sprintf('O campo "%s" não foi aceite: %s.', $field, $why));
+			}
+
+			foreach ($cleaned['values'] as $field => $value) {
+				$verified = !in_array($field, self::TRANSCRIBED, true)
+					|| $this->boxText->corroborates($text, (string)$value);
+
+				$proposal->observe(
+					[$field => $value],
+					ScanProposal::CONFIDENCE_TEXT,
+					'extraído pelo agente',
+					$verified
+				);
+			}
+		}
+
+		$result = $proposal->result();
+		$medicine = $this->attachKnownMedicine($proposal, $result['values']['gtin'] ?? null, $userId);
+		$result = $proposal->result();
+
+		if (!isset($result['values']['expiry'])) {
+			$proposal->warn(
+				'Não se encontrou validade no texto. É o campo que esta app existe para não '
+				. 'errar -- escreve-a a olhar para a caixa.'
+			);
+			$result = $proposal->result();
+		}
+
+		return [
+			'proposal' => $result,
+			'medicine' => $medicine,
+			'read' => ['values' => $read['values'], 'evidence' => $read['evidence']],
+			'rejected' => $rejected,
+		];
+	}
+
+	/**
+	 * Junta varias leituras -- codigo, texto, e o que se escreveu a mao --
+	 * numa proposta so.
+	 *
+	 * Uma caixa precisa de mais do que uma leitura: o nome esta na frente, o
+	 * DataMatrix com o lote e a validade esta noutro painel, e os dias apos
+	 * abertura estao no folheto.
+	 *
+	 * @param list<array{payload?: string, text?: string, values?: array, from?: string, manual?: bool}> $observations
 	 */
 	public function merge(array $observations, string $userId): array {
 		$proposal = new ScanProposal();
 		$medicine = null;
+		$rejected = [];
 
 		foreach ($observations as $index => $observation) {
 			$from = (string)($observation['from'] ?? sprintf('leitura %d', $index + 1));
 
-            // Um codigo: exacto, e pode trazer o medicamento ja conhecido.
+			// Um codigo descodificado: exacto, e pode trazer o medicamento
+			// que ja se conhece.
 			if (($observation['payload'] ?? '') !== '') {
 				$one = $this->fromCode((string)$observation['payload'], $userId);
 				$medicine ??= $one['medicine'];
-				foreach ($one['proposal']['fields'] as $field => $entry) {
-					$proposal->observe([$field => $entry['value']], $entry['confidence'], $from);
-				}
-				foreach ($one['proposal']['warnings'] as $warning) {
-					$proposal->warn($warning);
-				}
+				$this->absorb($proposal, $one['proposal'], $from);
 			}
 
-			// Texto lido de uma fotografia, ou escrito a mao.
+			// Texto lido da caixa: as regras daqui encontram-lhe os campos.
+			if (trim((string)($observation['text'] ?? '')) !== '') {
+				$one = $this->fromText(
+					(string)$observation['text'],
+					$userId,
+					(array)($observation['values'] ?? []),
+					$from
+				);
+				$medicine ??= $one['medicine'];
+				$rejected += $one['rejected'];
+				$this->absorb($proposal, $one['proposal'], $from);
+				continue;
+			}
+
+			// Campos sem texto de onde os confirmar. Escritos a mao valem por
+			// quem os escreveu; vindos de um modelo, nao ha com que os
+			// confirmar -- e isso tem de aparecer.
 			if (($observation['values'] ?? []) !== []) {
-				$confidence = ($observation['manual'] ?? false)
-					? ScanProposal::CONFIDENCE_MANUAL
-					: ScanProposal::CONFIDENCE_TEXT;
-				$proposal->observe((array)$observation['values'], $confidence, $from);
+				$manual = (bool)($observation['manual'] ?? false);
+				$cleaned = $this->rules->clean((array)$observation['values']);
+				$rejected += $cleaned['rejected'];
+
+				foreach ($cleaned['rejected'] as $field => $why) {
+					$proposal->warn(sprintf('O campo "%s" não foi aceite: %s.', $field, $why));
+				}
+
+				foreach ($cleaned['values'] as $field => $value) {
+					$verified = $manual || !in_array($field, self::TRANSCRIBED, true);
+					$proposal->observe(
+						[$field => $value],
+						$manual ? ScanProposal::CONFIDENCE_MANUAL : ScanProposal::CONFIDENCE_TEXT,
+						$from,
+						$verified
+					);
+				}
 			}
 		}
 
-		return ['proposal' => $proposal->result(), 'medicine' => $medicine];
+		$result = $proposal->result();
+		if ($medicine === null) {
+			$medicine = $this->attachKnownMedicine($proposal, $result['values']['gtin'] ?? null, $userId);
+			$result = $proposal->result();
+		}
+
+		return ['proposal' => $result, 'medicine' => $medicine, 'rejected' => $rejected];
 	}
 
 	/**
 	 * Grava uma proposta confirmada: cria o medicamento se for novo, e a caixa.
 	 *
-	 * @param array $values os campos tal como vao ser gravados -- ja revistos
+	 * Os campos passam pelas regras de forma outra vez, de proposito. Pode
+	 * chegar aqui coisa que nunca passou por uma proposta -- um agente pode
+	 * chamar isto directamente -- e e este o ultimo sitio antes da base.
+	 *
 	 * @throws \OCP\AppFramework\Db\DoesNotExistException
+	 * @throws \InvalidArgumentException
 	 */
 	public function apply(array $values, string $userId): array {
-		$medicineId = isset($values['medicineId']) && $values['medicineId'] !== ''
-			? (int)$values['medicineId']
-			: null;
+		$cleaned = $this->rules->clean($values);
+
+		if ($cleaned['rejected'] !== []) {
+			$parts = [];
+			foreach ($cleaned['rejected'] as $field => $why) {
+				$parts[] = sprintf('%s (%s)', $field, $why);
+			}
+			// Recusa-se tudo e nao so o campo mau. Gravar uma caixa sem a
+			// validade que se achava que ia gravada e pior do que nao gravar:
+			// fica um registo com ar de completo.
+			throw new \InvalidArgumentException(
+				'Estes campos não foram aceites: ' . implode('; ', $parts)
+				. '. Nada foi gravado.'
+			);
+		}
+
+		$values = $cleaned['values'];
+		$medicineId = isset($values['medicineId']) ? (int)$values['medicineId'] : null;
 
 		if ($medicineId === null) {
 			$name = trim((string)($values['name'] ?? ''));
@@ -191,98 +338,55 @@ class ScanService {
 		return ['medicineId' => $medicineId, 'package' => $package];
 	}
 
-	// ------------------------------------------------- Leitura de fotografias
-
-	public function readerUrl(): ?string {
-		$url = trim($this->appConfig->getValueString(Application::APP_ID, self::CONFIG_READER_URL, ''));
-		return $url === '' ? null : rtrim($url, '/');
-	}
+	// ------------------------------------------------------------- Interno
 
 	/**
-	 * Se a leitura de fotografias esta disponivel, e o que falta se nao.
-	 *
-	 * Dito em vez de escondido: sem isto configurado, o caminho da fotografia
-	 * nao existe, e um botao que nao funciona e pior do que um botao ausente.
+	 * Se esta caixa ja foi registada, o registo anterior manda: foi
+	 * confirmado por uma pessoa. E o que faz a segunda leitura da mesma
+	 * embalagem preencher-se sozinha.
 	 */
-	public function readerStatus(): array {
-		$url = $this->readerUrl();
-		if ($url === null) {
-			return [
-				'available' => false,
-				'reason' => 'Não há serviço de leitura de códigos configurado. Define "'
-					. self::CONFIG_READER_URL . '" na configuração da app, apontando para um serviço '
-					. 'que leia DataMatrix de uma imagem.',
-			];
+	private function attachKnownMedicine(
+		ScanProposal $proposal,
+		mixed $gtin,
+		string $userId,
+	): ?array {
+		if ($gtin === null || $gtin === '') {
+			return null;
 		}
-		return ['available' => true, 'url' => $url];
+
+		$found = $this->medicines->findByGtin((string)$gtin, $userId);
+		if ($found === null) {
+			$proposal->warn(
+				'Este código ainda não está associado a nenhum medicamento. Dá-lhe o nome uma '
+				. 'vez e, da próxima, a caixa preenche-se sozinha.'
+			);
+			return null;
+		}
+
+		$proposal->observe([
+			'medicineId' => $found->getId(),
+			'name' => $found->getName(),
+			'substance' => $found->getSubstance(),
+			'strength' => $found->getStrength(),
+			'form' => $found->getForm(),
+			'unit' => $found->getUnit(),
+		], ScanProposal::CONFIDENCE_MANUAL, 'registo anterior desta caixa');
+
+		return $found->jsonSerialize();
 	}
 
-	/**
-	 * Manda uma imagem ao servico de leitura e devolve os codigos encontrados.
-	 *
-	 * @return list<string>
-	 * @throws ScanException
-	 */
-	public function decodeImage(string $contents, string $filename): array {
-		$url = $this->readerUrl();
-		if ($url === null) {
-			throw new ScanException($this->readerStatus()['reason']);
+	/** Passa os campos de uma proposta para outra, mantendo a confianca. */
+	private function absorb(ScanProposal $target, array $source, string $from): void {
+		foreach ($source['fields'] as $field => $entry) {
+			$target->observe(
+				[$field => $entry['value']],
+				$entry['confidence'],
+				$from,
+				$entry['verified'] ?? true
+			);
 		}
-
-		$path = $this->appConfig->getValueString(
-			Application::APP_ID, self::CONFIG_READER_PATH, '/api/v1/image/scan'
-		);
-
-		try {
-			$response = $this->clientService->newClient()->post($url . $path, [
-				'multipart' => [[
-					'name' => 'file', 'contents' => $contents, 'filename' => $filename,
-				]],
-				'connect_timeout' => 15,
-				'timeout' => 120,
-			]);
-		} catch (\Throwable $e) {
-			$this->logger->warning('Falhou a leitura da imagem', ['exception' => $e, 'url' => $url]);
-			throw new ScanException('Não foi possível contactar o serviço de leitura (' . $url . ').');
+		foreach ($source['warnings'] as $warning) {
+			$target->warn($warning);
 		}
-
-		$decoded = json_decode((string)$response->getBody(), true);
-		if (!is_array($decoded)) {
-			throw new ScanException('O serviço de leitura devolveu uma resposta que não se percebeu.');
-		}
-
-		return $this->collectPayloads($decoded);
-	}
-
-	/**
-	 * Vai buscar as cadeias de codigo a uma resposta, sem assumir a forma.
-	 *
-	 * Servicos de leitura diferentes devolvem formas diferentes -- uma lista
-	 * de objectos, um objecto com "codes", um campo "raw_content". Em vez de
-	 * fixar uma, procura-se recursivamente o que parece conteudo de codigo.
-	 * Uma cadeia GS1 reconhece-se: comeca por um identificador de aplicacao.
-	 *
-	 * @return list<string>
-	 */
-	private function collectPayloads(array $data): array {
-		$found = [];
-
-		$walk = function (mixed $node) use (&$walk, &$found): void {
-			if (is_string($node)) {
-				if (preg_match('/^(\]d2)?(01|17|10|21)\d/', $node) === 1) {
-					$found[] = $node;
-				}
-				return;
-			}
-			if (is_array($node)) {
-				foreach ($node as $child) {
-					$walk($child);
-				}
-			}
-		};
-
-		$walk($data);
-
-		return array_values(array_unique($found));
 	}
 }

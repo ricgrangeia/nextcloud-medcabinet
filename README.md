@@ -115,9 +115,14 @@ mão. O nome não vem lá, mas esse lê-se na caixa num segundo.
 # Interpretar o conteúdo do código (de qualquer app de leitura do telefone)
 curl $AUTH -X POST "$BASE/scan/code" -d '{"payload": "010560123456789717280331"}'
 
-# Várias fotos da mesma caixa
-curl -u 'utilizador:app-password' -H 'OCS-APIRequest: true' \
-  -F 'file[]=@frente.jpg' -F 'file[]=@painel.jpg' "$BASE/scan/photos"
+# O texto lido da caixa -- as regras daqui e que lhe encontram os campos
+curl $AUTH -X POST "$BASE/scan/text" -d '{"text": "BEN-U-RON 500 mg Val.: 03/2028"}'
+
+# Varias leituras da mesma caixa juntas (o nome esta na frente, a validade atras)
+curl $AUTH -X POST "$BASE/scan/merge" -d '{"observations": [
+  {"text": "BEN-U-RON paracetamol 500 mg", "from": "frente"},
+  {"text": "Lote AB1234 Val 03/2028", "from": "painel de tras"}
+]}'
 
 # Gravar, depois de revisto
 curl $AUTH -X POST "$BASE/scan/apply" -d '{"values": {
@@ -128,11 +133,12 @@ curl $AUTH -X POST "$BASE/scan/apply" -d '{"values": {
 
 ### Uma proposta não é um registo
 
-`POST /scan/code` e `/scan/photos` devolvem uma **proposta**, e gravar é um passo separado
-de propósito. Cada campo diz de onde veio e com que confiança:
+`/scan/code`, `/scan/text` e `/scan/merge` devolvem uma **proposta**, e gravar é um passo
+separado de propósito. Cada campo diz de onde veio, com que confiança, e se foi confirmado:
 
-- **do código** — exato, tem dígito de controlo; pode ser gravado sem perguntar
-- **de texto numa fotografia** — entra em `needsReview`
+- **do código descodificado** — exato, tem dígito de controlo; pode ser gravado sem perguntar
+- **de texto** — entra em `needsReview`
+- **não confirmado** — veio já extraído e o texto não o contém; entra também em `unverified`
 
 A distinção não é formalidade. Um «7» lido como «1» desloca a validade seis anos e continua
 a parecer uma data perfeitamente normal — e dar uma caixa como boa dois anos depois de o
@@ -148,98 +154,89 @@ mês**, não dia zero. `280300` é 31 de março de 2028. Ao pé da letra dá uma
 arredondado para o dia 1 encurta a validade um mês inteiro, e a app deitaria fora
 medicamentos bons.
 
-## Catalogar uma caixa com a IA do Nextcloud
+## Quem lê a caixa não é esta app
 
-Fotografa a caixa — a frente para o nome, o painel onde está a validade — e envia as fotos.
-Não precisa de serviço nenhum de fora: usa os fornecedores de IA do próprio servidor, pela
-API de `TaskProcessing`.
+Esta app **não trata imagens**, de propósito. Quem fotografa a caixa e interpreta a
+fotografia é o **agente** (`appsagent`), que já tem modelo de visão (`core:analyze-images`)
+e descobre estas rotas sozinho por reflexão sobre os atributos `#[ApiRoute]`.
+
+Aqui ficam o registo e as regras do domínio. A separação não é só de responsabilidades —
+é o que faz as regras aguentarem-se: **quem escreve o registo é quem tem de validar.** Se a
+regra vivesse no agente, um agente novo, uma versão nova do modelo ou uma chamada feita à
+mão com `curl` entravam sem passar por ela. A app é o último sítio antes da base de dados.
+
+### Três entradas, uma saída
+
+| Endpoint | O que recebe | Confiança |
+| --- | --- | --- |
+| `POST /scan/code` | uma cadeia GS1 **já descodificada** | exata — tem dígito de controlo |
+| `POST /scan/text` | o **texto** lido da caixa | a confirmar |
+| `POST /scan/merge` | várias leituras da mesma caixa | a maior de cada campo |
 
 ```bash
-# Ver o que a IA deste servidor sabe fazer com imagens
+# O agente leu a fotografia e manda o texto
 curl -u ric:app-password -H 'OCS-APIRequest: true' \
-  'https://nuvem/ocs/v2.php/apps/medcabinet/api/v1/ai/status'
-
-# Enviar fotografias (devolve 202 com o id da leitura)
-curl -u ric:app-password -H 'OCS-APIRequest: true' \
-  -F 'file[]=@frente.jpg' -F 'file[]=@validade.jpg' \
-  'https://nuvem/ocs/v2.php/apps/medcabinet/api/v1/ai/scan'
-
-# Fotos que já estão no Nextcloud (tiradas com a app do telemóvel)
-curl -u ric:app-password -H 'OCS-APIRequest: true' \
-  -d 'fileIds[]=1234' -d 'fileIds[]=1235' \
-  'https://nuvem/ocs/v2.php/apps/medcabinet/api/v1/ai/scan'
-
-# O ponto da leitura, e a proposta quando terminar (text=1 traz o texto em bruto)
-curl -u ric:app-password -H 'OCS-APIRequest: true' \
-  'https://nuvem/ocs/v2.php/apps/medcabinet/api/v1/ai/scans/7?text=1'
+  -d 'text=BEN-U-RON paracetamol 500 mg 20 comprimidos Lote: AB1234 Val.: 03/2028' \
+  -d 'from=foto do painel de trás' \
+  'https://nuvem/ocs/v2.php/apps/medcabinet/api/v1/scan/text'
 ```
 
-### Duas tarefas, com papéis diferentes
+As regras encontram no texto a validade, o lote, a dosagem, a quantidade, a forma e o
+código nacional — por **expressão regular, não por modelo**. A diferença não é académica: um
+modelo que «lê» uma data pode devolver uma data que não está lá; uma expressão regular sobre
+o texto não inventa — ou encontra o que está escrito, ou não devolve nada.
 
-| Tarefa | O que faz | De onde saem os campos |
-| --- | --- | --- |
-| `core:analyze-images` | reconhece **que produto é** | nome, substância, forma |
-| `core:image2text:ocr` | transcreve **o que está impresso** | validade, lote, dosagem, quantidade |
+A resposta traz `read.evidence`: para cada campo, o pedaço de texto onde ele apareceu. É a
+resposta a «porque é que a validade saiu assim», e sem isso uma proposta estranha não se
+consegue explicar.
 
-A divisão não é arbitrária. Classificar é o que um modelo faz bem e uma expressão regular
-não faz de maneira nenhuma. Transcrever é o contrário: a resposta certa está impressa na
-caixa, letra a letra, e sobre o texto extraído são **regras** que encontram a validade — não
-um modelo.
+### Um campo que o texto não confirme não conta como lido
 
-### Um número que o texto não confirme não conta como lido
+O agente pode mandar em `values` os campos que já extraiu. Esses são **conferidos contra o
+`text`** que ele próprio enviou: o que não aparecer lá volta em `unverified`, entra em
+`needsReview`, e na interface aparece a vermelho.
 
-É a regra que molda tudo isto. Um modelo a quem falta a validade na fotografia não devolve
-«não sei»: devolve **uma data plausível**. E uma data plausível errada é exatamente o que
-esta app existe para evitar.
+```bash
+curl -u ric:app-password -H 'OCS-APIRequest: true' \
+  -d 'text=BEN-U-RON paracetamol 500 mg' \
+  -d 'values[expiry]=2029-07-31' \
+  'https://nuvem/ocs/v2.php/apps/medcabinet/api/v1/scan/text'
+# -> unverified: ["expiry"]   (a data não está no texto)
+```
 
-Por isso tudo o que é transcrição — validade, lote, dosagem, quantidade, códigos — é
-conferido contra o texto do OCR. O que não aparecer lá fica em `unverified`, entra em
-`needsReview`, e na interface aparece a vermelho com «não confirmado». A comparação ignora
-pontuação, porque `03/2028`, `03-2028` e `032028` são a mesma coisa impressa de maneiras
-diferentes.
+É a regra que molda tudo isto. Um modelo a quem falta a validade na fotografia não responde
+«não sei»: responde **uma data plausível**. E uma data plausível errada é exatamente o erro
+que esta app existe para evitar — dar uma caixa como boa dois anos depois de o estar.
 
-Consequência honesta: **sem OCR no servidor, nenhum número proposto pelo modelo conta como
-confirmado.** O `GET /ai/status` diz as duas capacidades em separado por isso mesmo.
+A comparação ignora pontuação, porque `03/2028`, `03-2028` e `032028` são a mesma coisa
+impressa de maneiras diferentes. Valores com menos de três caracteres nunca contam como
+confirmados: acertavam por acaso em qualquer texto cheio de números.
 
-Ao modelo pede-se explicitamente que **não use o que sabe sobre o produto**. Um modelo que
-conhece a marca preenche a dosagem de cabeça — acerta quase sempre, e o «quase» é uma caixa
-de 1000 mg registada como 500.
+A distinção é por tipo de campo, não por desconfiança geral:
 
-### É assíncrono, e tem de ser
+- **transcrição** (validade, lote, dosagem, quantidade, códigos) — tem de aparecer no texto;
+- **classificação** (nome, substância, forma) — não precisa. Um nome errado vê-se logo; uma
+  validade errada não se vê nunca.
 
-Um modelo local a olhar para três fotografias leva mais do que um pedido web aguenta. O
-`POST /ai/scan` devolve logo `202`; as tarefas são agendadas e a app é avisada por evento
-(`TaskSuccessfulEvent`/`TaskFailedEvent`), continuando o trabalho quando a IA responder. O
-resultado chega pelas **notificações do Nextcloud** — fechar o separador não perde nada.
+### As regras de forma
 
-Um trabalho de fundo de meia em meia hora fecha as leituras que ficaram penduradas, mas só
-depois de perguntar à IA pela tarefa: um evento pode perder-se com a tarefa a ter corrido
-bem, e desistir sem perguntar perdia uma leitura boa.
+Tudo o que chega passa por `FieldRules`, no `/scan/text`, no `/scan/merge` **e outra vez** no
+`/scan/apply` — porque um agente pode chamar o `apply` directamente.
 
-### Onde ficam as fotografias
+| Campo | Regra |
+| --- | --- |
+| `expiry` | tem de ser um dia que existe. `2028-02-30` é recusada; `2028-02` vale `2028-02-29` |
+| `form` | uma das formas conhecidas, ou nada |
+| `gtin` | dígito de controlo tem de bater; um GTIN errado associa a caixa ao medicamento errado da próxima vez |
+| `batch` | letras e dígitos, sem espaços |
+| `unitsTotal` | um número |
 
-Nos **Ficheiros do próprio utilizador**, em `Medicamentos/Caixas` (configurável em
-`ai_photos_folder`), não no appdata da app. Duas razões que apontam para o mesmo lado: a
-`TaskProcessing` só aceita ficheiros a que o utilizador tem acesso, e a fotografia da caixa
-é a prova de onde a validade saiu — vale mais guardada onde ele a encontra.
+São regras de **forma, não de plausibilidade**. `2028-02-30` é recusada porque esse dia não
+existe, não porque pareça improvável — rejeitar por parecer estranho dava uma app que discute
+com quem tem a caixa na mão.
 
-### Precisa de um fornecedor de IA instalado
-
-A app não traz modelo nenhum. Precisa de um fornecedor que registe
-`core:analyze-images` ou `core:image2text:ocr` — por exemplo o *Local AI Assistant* ou o
-*Context Chat*. Confirma-se em **Definições de administração > Inteligência artificial**, e
-`GET /ai/status` diz exatamente o que falta.
-
-### Para a leitura por fotografia funcionar
-
-É preciso um serviço que leia DataMatrix de uma imagem, configurado em
-`code_reader_url` (e `code_reader_path`, por omissão `/api/v1/image/scan`). A resposta é
-percorrida à procura de cadeias GS1, sem assumir a forma do JSON — serviços diferentes
-devolvem estruturas diferentes.
-
-`GET /api/v1/scan/status` diz se está disponível e o que falta se não estiver. Sem isso
-configurado, a interface não mostra o botão: um botão que não funciona é pior do que um
-botão ausente.
+E se um campo não passa no `/scan/apply`, **nada é gravado**. Gravar a caixa sem a validade
+que se achava que ia gravada deixava um registo com ar de completo, que é pior do que nenhum.
 
 ## Desenvolvimento
 
@@ -252,11 +249,8 @@ composer run test:unit
 Os testes são unitários puros e correm **sem um Nextcloud à volta** — `tests/bootstrap.php`
 usa os stubs do `nextcloud/ocp` quando não encontra um servidor.
 
-Nota sobre esses stubs: `OCP\Files\IRootFolder` **não se consegue simular** fora de um
-servidor, porque herda de `OC\Hooks\Emitter`, que é do namespace privado e o pacote de
-stubs não traz. É por isso que o acesso a ficheiros vive à parte, em `PhotoStore`: ali não
-há decisão nenhuma, e o `AiScanService`, que é onde está tudo o que vale a pena testar,
-fica testável.
+Correm sem dependências de servidor porque nenhum dos serviços testados toca em ficheiros
+nem em serviços do Nextcloud — o que é consequência de a app não tratar imagens.
 
 ## Licença
 
