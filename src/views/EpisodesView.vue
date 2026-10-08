@@ -1,6 +1,15 @@
 <template>
 	<div class="mc-page">
-		<h2>Para que serviram</h2>
+		<div class="mc-head">
+			<h2>Para que serviram</h2>
+			<NcButton type="button" variant="primary" @click="startCreate">
+				<template #icon>
+					<PlusIcon :size="20" />
+				</template>
+				Registar episódio
+			</NcButton>
+		</div>
+
 		<p class="mc-hint">
 			Um episódio é <strong>um motivo</strong>, para <strong>uma pessoa</strong>, num
 			intervalo. É aqui que fica o "para quê" — e não no medicamento, porque o mesmo
@@ -12,15 +21,6 @@
 			indicação de quem — que é o que te serve para falar com um médico, não para dispensar
 			de falar com ele.
 		</div>
-
-		<form class="mc-form" @submit.prevent="create">
-			<NcTextField v-model="form.reason" label="Motivo" placeholder="otite" required />
-			<NcSelect v-model="form.personId" :options="peopleOptions" :reduce="(o) => o.value"
-				label="label" input-label="Para quem" />
-			<NcDateTimePickerNative v-model="form.startedAt" label="Começou em" type="date" />
-			<NcTextField v-model="form.prescriber" label="Indicado por" placeholder="Dr. X, ou 'nós'" />
-			<NcButton type="primary" native-type="submit">Registar episódio</NcButton>
-		</form>
 
 		<div class="mc-form">
 			<NcTextField v-model="query" label="Procurar" placeholder="motivo, resultado ou notas"
@@ -51,7 +51,7 @@
 						<td>{{ item.medicineName || '—' }}</td>
 						<td>{{ item.posology || '—' }}</td>
 						<td class="mc-num">
-							<NcButton type="tertiary" @click="removeItem(item)">Remover</NcButton>
+							<NcButton type="button" variant="tertiary" @click="removeItem(item)">Remover</NcButton>
 						</td>
 					</tr>
 				</tbody>
@@ -62,15 +62,47 @@
 				<strong>Resultado:</strong> {{ ep.outcome }}
 			</p>
 
-			<form class="mc-form" style="margin-top:12px" @submit.prevent="addItem(ep)">
-				<NcSelect v-model="itemForm[ep.id].medicineId" :options="medicineOptions"
-					:reduce="(o) => o.value" label="label" input-label="Medicamento" />
-				<NcTextField v-model="itemForm[ep.id].posology" label="Posologia"
-					placeholder="1 comp. de 8 em 8 h, 8 dias" />
-				<NcButton native-type="submit">Acrescentar</NcButton>
-				<NcButton type="tertiary" @click="remove(ep)">Apagar episódio</NcButton>
-			</form>
+			<div class="mc-form" style="margin:12px 0 0">
+				<NcButton type="button" @click="startItem(ep)">
+					<template #icon>
+						<PlusIcon :size="20" />
+					</template>
+					Acrescentar medicamento
+				</NcButton>
+				<NcButton type="button" variant="tertiary" @click="remove(ep)">Apagar episódio</NcButton>
+			</div>
 		</div>
+
+		<!-- --------------------------------------------- Registar episodio -->
+
+		<FormDialog v-model:open="creating" name="Registar episódio"
+			submit-label="Registar" :busy="saving" :disabled="!form.reason.trim()"
+			@submit="create">
+			<NcTextField v-model="form.reason" label="Motivo" placeholder="otite" required />
+			<NcSelect v-model="form.personId" :options="peopleOptions" :reduce="(o) => o.value"
+				label="label" input-label="Para quem" />
+			<NcDateTimePickerNative v-model="form.startedAt" label="Começou em" type="date" />
+			<NcTextField v-model="form.prescriber" label="Indicado por" placeholder="Dr. X, ou 'nós'" />
+			<p class="mc-hint" style="margin:0">
+				Os medicamentos acrescentam-se depois, ao episódio já criado.
+			</p>
+		</FormDialog>
+
+		<!-- ------------------------------------- Acrescentar ao episodio -->
+
+		<FormDialog v-model:open="addingItem"
+			:name="`Acrescentar a «${itemTarget?.reason ?? ''}»`"
+			submit-label="Acrescentar" :busy="savingItem" :disabled="!itemForm.medicineId"
+			@submit="addItem">
+			<NcSelect v-model="itemForm.medicineId" :options="medicineOptions"
+				:reduce="(o) => o.value" label="label" input-label="Medicamento" />
+			<NcTextField v-model="itemForm.posology" label="Posologia"
+				placeholder="1 comp. de 8 em 8 h, 8 dias" />
+			<p class="mc-hint" style="margin:0">
+				A posologia fica como veio escrita. Arrumá-la em campos seria inventar uma
+				precisão que a receita não tem.
+			</p>
+		</FormDialog>
 	</div>
 </template>
 
@@ -81,8 +113,10 @@ import NcTextField from '@nextcloud/vue/components/NcTextField'
 import NcSelect from '@nextcloud/vue/components/NcSelect'
 import NcLoadingIcon from '@nextcloud/vue/components/NcLoadingIcon'
 import NcDateTimePickerNative from '@nextcloud/vue/components/NcDateTimePickerNative'
+import PlusIcon from 'vue-material-design-icons/Plus.vue'
 import { showError, showSuccess } from '@nextcloud/dialogs'
 
+import FormDialog from '../components/FormDialog.vue'
 import api from '../api/client.js'
 import { formatDate, toIsoDate } from '../utils/format.js'
 
@@ -92,10 +126,19 @@ const people = ref([])
 const medicines = ref([])
 const query = ref('')
 const filterPerson = ref(null)
-const itemForm = reactive({})
 let searchTimer = null
 
+const creating = ref(false)
+const saving = ref(false)
 const form = reactive({ reason: '', personId: null, startedAt: new Date(), prescriber: '' })
+
+// Uma janela so, com o episodio a que se esta a acrescentar. Antes havia um
+// formulario por cartao e um estado por episodio; o que se ganha e nao ter
+// tantos formularios abertos quantos os episodios da lista.
+const addingItem = ref(false)
+const savingItem = ref(false)
+const itemTarget = ref(null)
+const itemForm = reactive({ medicineId: null, posology: '' })
 
 const peopleOptions = computed(() => people.value.map((p) => ({ value: p.id, label: p.name })))
 const medicineOptions = computed(() => medicines.value.map((m) => ({
@@ -114,11 +157,6 @@ const load = async () => {
 		episodes.value = eps
 		people.value = ppl
 		medicines.value = meds
-		for (const ep of eps) {
-			if (!itemForm[ep.id]) {
-				itemForm[ep.id] = { medicineId: null, posology: '' }
-			}
-		}
 	} catch (error) {
 		showError('Não foi possível carregar os episódios.')
 	} finally {
@@ -131,10 +169,16 @@ const search = () => {
 	searchTimer = setTimeout(load, 300)
 }
 
+const startCreate = () => {
+	Object.assign(form, { reason: '', personId: null, startedAt: new Date(), prescriber: '' })
+	creating.value = true
+}
+
 const create = async () => {
 	if (!form.reason.trim()) {
 		return
 	}
+	saving.value = true
 	try {
 		await api.createEpisode({
 			reason: form.reason.trim(),
@@ -142,29 +186,38 @@ const create = async () => {
 			startedAt: toIsoDate(form.startedAt),
 			prescriber: form.prescriber.trim() || null,
 		})
-		form.reason = ''
-		form.prescriber = ''
+		creating.value = false
 		showSuccess('Episódio registado. Acrescenta-lhe os medicamentos.')
 		await load()
 	} catch (error) {
 		showError(error?.response?.data?.ocs?.data?.message ?? 'Não foi possível registar.')
+	} finally {
+		saving.value = false
 	}
 }
 
-const addItem = async (ep) => {
-	const entry = itemForm[ep.id]
-	if (!entry?.medicineId) {
+const startItem = (ep) => {
+	itemTarget.value = ep
+	Object.assign(itemForm, { medicineId: null, posology: '' })
+	addingItem.value = true
+}
+
+const addItem = async () => {
+	if (!itemTarget.value || !itemForm.medicineId) {
 		return
 	}
+	savingItem.value = true
 	try {
-		await api.addEpisodeItem(ep.id, {
-			medicineId: entry.medicineId,
-			posology: entry.posology.trim() || null,
+		await api.addEpisodeItem(itemTarget.value.id, {
+			medicineId: itemForm.medicineId,
+			posology: itemForm.posology.trim() || null,
 		})
-		entry.posology = ''
+		addingItem.value = false
 		await load()
 	} catch (error) {
 		showError('Não foi possível acrescentar.')
+	} finally {
+		savingItem.value = false
 	}
 }
 

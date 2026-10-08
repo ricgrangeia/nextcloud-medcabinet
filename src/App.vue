@@ -73,6 +73,33 @@ import AccountIcon from 'vue-material-design-icons/AccountMultiple.vue'
 
 .mc-card-head strong { font-size: 16px; }
 
+/* Titulo da pagina e o botao que abre o formulario. O botao fica aqui e nao
+   por cima da lista: assim a lista comeca onde se espera, e nao depois de um
+   formulario que se usa de vez em quando. */
+.mc-head {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	gap: 16px;
+	flex-wrap: wrap;
+	margin-bottom: 4px;
+}
+
+.mc-head h2 { margin: 0; }
+
+/* Campos dentro de uma janela: um por linha, a largura toda. Em linha, como
+   na pagina, um campo de validade ficava ao lado de um de quantidade com o
+   mesmo aspecto. */
+.mc-fields {
+	display: flex;
+	flex-direction: column;
+	gap: 16px;
+	padding: 4px 2px 8px;
+	min-width: min(420px, 100%);
+}
+
+.mc-fields > .mc-hint { max-width: none; }
+
 .mc-form {
 	display: flex;
 	flex-wrap: wrap;

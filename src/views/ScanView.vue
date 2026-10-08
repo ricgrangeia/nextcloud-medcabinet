@@ -29,7 +29,7 @@
 		<form class="mc-form" @submit.prevent="readCode">
 			<NcTextField v-model="payload" label="Conteúdo do código"
 				placeholder="010560123456789717280331..." style="min-width:340px" />
-			<NcButton type="primary" native-type="submit" :disabled="!payload.trim() || busy">
+			<NcButton type="submit" variant="primary" :disabled="!payload.trim() || busy">
 				Interpretar
 			</NcButton>
 		</form>
@@ -46,7 +46,7 @@
 			<textarea v-model="text" class="mc-textarea" rows="6"
 				placeholder="BEN-U-RON&#10;paracetamol 500 mg&#10;20 comprimidos&#10;Lote: AB1234&#10;Val.: 03/2028" />
 			<div class="mc-form">
-				<NcButton type="primary" native-type="submit" :disabled="!text.trim() || busy">
+				<NcButton type="submit" variant="primary" :disabled="!text.trim() || busy">
 					Ler o texto
 				</NcButton>
 			</div>
@@ -130,11 +130,11 @@
 			</details>
 
 			<div class="mc-form" style="margin-top:16px">
-				<NcButton type="primary" :disabled="applying || (!form.name && !form.medicineId)"
+				<NcButton type="button" variant="primary" :disabled="applying || (!form.name && !form.medicineId)"
 					@click="apply">
 					Guardar no armário
 				</NcButton>
-				<NcButton type="tertiary" @click="reset">Descartar</NcButton>
+				<NcButton type="button" variant="tertiary" @click="reset">Descartar</NcButton>
 			</div>
 		</template>
 	</div>

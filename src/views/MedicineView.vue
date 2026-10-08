@@ -3,7 +3,16 @@
 		<NcLoadingIcon v-if="loading" :size="32" />
 
 		<template v-else-if="med">
-			<h2>{{ med.name }}{{ med.strength ? ' ' + med.strength : '' }}</h2>
+			<div class="mc-head">
+				<h2>{{ med.name }}{{ med.strength ? ' ' + med.strength : '' }}</h2>
+				<NcButton type="button" variant="primary" @click="startPackage">
+					<template #icon>
+						<PlusIcon :size="20" />
+					</template>
+					Registar caixa
+				</NcButton>
+			</div>
+
 			<p class="mc-hint">
 				{{ med.substance || 'sem substância ativa registada' }}
 				<template v-if="med.form"> · {{ med.form }}</template>
@@ -18,21 +27,11 @@
 				Num {{ med.form }}, a validade impressa deixa de valer quando se abre — e sem este
 				número a app não pode dizer se uma embalagem aberta está boa. Vem no folheto.
 				<div class="mc-form" style="margin:8px 0 0">
-					<NcTextField v-model="daysInput" type="number" label="Dias após abertura" placeholder="28" />
-					<NcButton @click="saveDays">Guardar</NcButton>
+					<NcButton type="button" @click="startDays">Indicar os dias</NcButton>
 				</div>
 			</div>
 
 			<h3>Caixas</h3>
-			<form class="mc-form" @submit.prevent="addPackage">
-				<NcTextField v-model="pkg.unitsTotal" type="number" step="any"
-					:label="`Quantas ${med.unit}`" placeholder="20" />
-				<NcDateTimePickerNative v-model="pkg.expiresAt" label="Validade na caixa" type="date" />
-				<NcTextField v-model="pkg.batch" label="Lote" placeholder="opcional" />
-				<NcTextField v-model="pkg.location" label="Onde está" placeholder="gaveta da cozinha" />
-				<NcButton type="primary" native-type="submit">Registar caixa</NcButton>
-			</form>
-
 			<p v-if="!med.packages.length" class="mc-empty">Nenhuma caixa registada.</p>
 
 			<div v-for="p in med.packages" :key="p.id" class="mc-card">
@@ -78,13 +77,20 @@
 					</div>
 				</div>
 
-				<div class="mc-form" style="margin-top:12px">
-					<NcButton v-if="!p.openedAt" @click="markOpened(p)">Marcar como aberta hoje</NcButton>
-					<NcButton v-else type="tertiary" @click="clearOpened(p)">Não está aberta</NcButton>
-					<NcTextField v-model="consume[p.id]" type="number" step="any"
-						label="Dar baixa de" :placeholder="med.unit" style="min-width:120px" />
-					<NcButton @click="takeFrom(p)">Dar baixa</NcButton>
-					<NcButton type="tertiary" @click="removePackage(p)">Apagar</NcButton>
+				<div class="mc-form" style="margin:12px 0 0">
+					<NcButton v-if="!p.openedAt" type="button" @click="markOpened(p)">
+						Marcar como aberta hoje
+					</NcButton>
+					<NcButton v-else type="button" variant="tertiary" @click="clearOpened(p)">
+						Não está aberta
+					</NcButton>
+					<NcButton type="button" @click="startTake(p)">
+						<template #icon>
+							<MinusIcon :size="20" />
+						</template>
+						Dar baixa
+					</NcButton>
+					<NcButton type="button" variant="tertiary" @click="removePackage(p)">Apagar</NcButton>
 				</div>
 			</div>
 
@@ -107,6 +113,69 @@
 					</tr>
 				</tbody>
 			</table>
+
+			<!-- ------------------------------------------- Registar caixa -->
+
+			<FormDialog v-model:open="addingPackage" name="Registar caixa"
+				submit-label="Registar" :busy="savingPackage" @submit="addPackage">
+				<NcTextField v-model="pkg.unitsTotal" type="number" step="any"
+					:label="`Quantas ${med.unit}`" placeholder="20" />
+				<NcDateTimePickerNative v-model="pkg.expiresAt" label="Validade na caixa" type="date" />
+				<NcTextField v-model="pkg.batch" label="Lote" placeholder="opcional" />
+				<NcTextField v-model="pkg.location" label="Onde está" placeholder="gaveta da cozinha" />
+				<p class="mc-hint" style="margin:0">
+					O total serve para a conta do que resta. Sem ele, "resta um quarto" não quer
+					dizer nada.
+				</p>
+			</FormDialog>
+
+			<!-- ----------------------------------------------- Dar baixa -->
+
+			<FormDialog v-model:open="taking" name="Dar baixa"
+				submit-label="Guardar" :busy="savingTake"
+				:disabled="consumed === ''" @submit="takeFrom">
+				<template v-if="takeTarget">
+					<p class="mc-hint" style="margin:0">
+						<template v-if="takeTarget.unitsLeft !== null">
+							Restam {{ formatNumber(takeTarget.unitsLeft) }}
+							<template v-if="takeTarget.unitsTotal">
+								de {{ formatNumber(takeTarget.unitsTotal) }}
+							</template>
+							{{ med.unit }}{{ takeTarget.location ? ` · ${takeTarget.location}` : '' }}.
+						</template>
+						<template v-else>
+							{{ takeTarget.location || 'Esta caixa' }}
+						</template>
+					</p>
+
+					<!-- Nao se sabe quantas restavam: tirar duas de um numero
+					     desconhecido nao da zero, da um numero desconhecido. Por
+					     isso aqui pergunta-se quantas ficaram, nao quantas saem. -->
+					<div v-if="takeTarget.unitsLeft === null" class="mc-warn" style="margin:0">
+						Não se sabe quantas restavam nesta caixa. Subtrair de um número
+						desconhecido daria um número inventado — escreve quantas ficam.
+					</div>
+
+					<NcTextField v-model="consumed" type="number" step="any" min="0"
+						:label="takeTarget.unitsLeft === null
+							? `Quantas ${med.unit} ficam`
+							: `Dar baixa de quantas ${med.unit}`"
+						:placeholder="takeTarget.unitsLeft === null ? '12' : '1'" />
+				</template>
+			</FormDialog>
+
+			<!-- --------------------------------------- Dias apos abertura -->
+
+			<FormDialog v-model:open="editingDays" name="Dias após abertura"
+				submit-label="Guardar" :busy="savingDays" :disabled="daysInput === ''"
+				@submit="saveDays">
+				<p class="mc-hint" style="margin:0">
+					Quantos dias um {{ med.form }} aberto continua bom. Vem no folheto, em
+					"depois de aberto" ou "após primeira abertura".
+				</p>
+				<NcTextField v-model="daysInput" type="number" min="1"
+					label="Dias após abertura" placeholder="28" />
+			</FormDialog>
 		</template>
 	</div>
 </template>
@@ -117,21 +186,35 @@ import NcButton from '@nextcloud/vue/components/NcButton'
 import NcTextField from '@nextcloud/vue/components/NcTextField'
 import NcLoadingIcon from '@nextcloud/vue/components/NcLoadingIcon'
 import NcDateTimePickerNative from '@nextcloud/vue/components/NcDateTimePickerNative'
+import PlusIcon from 'vue-material-design-icons/Plus.vue'
+import MinusIcon from 'vue-material-design-icons/Minus.vue'
 import { showError, showSuccess } from '@nextcloud/dialogs'
 
+import FormDialog from '../components/FormDialog.vue'
 import api from '../api/client.js'
-import { formatDate, formatNumber, toIsoDate, STATUS_LABEL, PERISHABLE_FORMS } from '../utils/format.js'
+import { formatDate, formatNumber, toIsoDate, isPerishableForm, STATUS_LABEL } from '../utils/format.js'
 
 const props = defineProps({ id: { type: [String, Number], required: true } })
 
 const loading = ref(true)
 const med = ref(null)
 const uses = ref([])
-const daysInput = ref('')
-const consume = reactive({})
-const pkg = reactive({ unitsTotal: '', expiresAt: null, batch: '', location: '' })
 
-const needsOpeningDays = computed(() => PERISHABLE_FORMS.includes(med.value?.form))
+const addingPackage = ref(false)
+const savingPackage = ref(false)
+const BLANK_PKG = { unitsTotal: '', expiresAt: null, batch: '', location: '' }
+const pkg = reactive({ ...BLANK_PKG })
+
+const taking = ref(false)
+const savingTake = ref(false)
+const takeTarget = ref(null)
+const consumed = ref('')
+
+const editingDays = ref(false)
+const savingDays = ref(false)
+const daysInput = ref('')
+
+const needsOpeningDays = computed(() => isPerishableForm(med.value?.form))
 
 const load = async () => {
 	loading.value = true
@@ -148,17 +231,35 @@ const load = async () => {
 	}
 }
 
+const startDays = () => {
+	daysInput.value = ''
+	editingDays.value = true
+}
+
 const saveDays = async () => {
+	const days = Number(daysInput.value)
+	if (!days || days <= 0) {
+		return
+	}
+	savingDays.value = true
 	try {
-		await api.updateMedicine(props.id, { daysAfterOpening: Number(daysInput.value) })
-		daysInput.value = ''
+		await api.updateMedicine(props.id, { daysAfterOpening: days })
+		editingDays.value = false
 		await load()
 	} catch (error) {
 		showError('Não foi possível guardar.')
+	} finally {
+		savingDays.value = false
 	}
 }
 
+const startPackage = () => {
+	Object.assign(pkg, BLANK_PKG)
+	addingPackage.value = true
+}
+
 const addPackage = async () => {
+	savingPackage.value = true
 	try {
 		await api.addPackage(props.id, {
 			unitsTotal: pkg.unitsTotal === '' ? null : Number(pkg.unitsTotal),
@@ -166,12 +267,13 @@ const addPackage = async () => {
 			batch: pkg.batch.trim() || null,
 			location: pkg.location.trim() || null,
 		})
-		pkg.unitsTotal = ''
-		pkg.batch = ''
+		addingPackage.value = false
 		showSuccess('Caixa registada.')
 		await load()
 	} catch (error) {
-		showError('Não foi possível registar a caixa.')
+		showError(error?.response?.data?.ocs?.data?.message ?? 'Não foi possível registar a caixa.')
+	} finally {
+		savingPackage.value = false
 	}
 }
 
@@ -193,18 +295,35 @@ const clearOpened = async (p) => {
 	}
 }
 
-const takeFrom = async (p) => {
-	const amount = Number(consume[p.id])
-	if (!amount || amount <= 0) {
+const startTake = (p) => {
+	takeTarget.value = p
+	consumed.value = ''
+	taking.value = true
+}
+
+const takeFrom = async () => {
+	const p = takeTarget.value
+	const amount = Number(consumed.value)
+	if (!p || consumed.value === '' || Number.isNaN(amount) || amount < 0) {
 		return
 	}
-	const left = Math.max(0, (p.unitsLeft ?? 0) - amount)
+
+	// Com o que restava conhecido, o campo e quanto sai e a app subtrai. Sem
+	// ele, o campo e quanto fica -- escrito por quem tem a caixa na mao.
+	const left = p.unitsLeft === null ? amount : Math.max(0, p.unitsLeft - amount)
+	if (p.unitsLeft !== null && amount <= 0) {
+		return
+	}
+
+	savingTake.value = true
 	try {
 		await api.updatePackage(p.id, { unitsLeft: left })
-		consume[p.id] = ''
+		taking.value = false
 		await load()
 	} catch (error) {
 		showError('Não foi possível dar baixa.')
+	} finally {
+		savingTake.value = false
 	}
 }
 
